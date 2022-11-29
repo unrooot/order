@@ -2,10 +2,76 @@
 	Author: ChiefWildin
 	Module: AnimNation
 	Created: 10/12/2022
-	Version: 1.0.0
+	Version: 1.1.0
 
-	An animation library that allows for easy one-shot object animation using
-	springs and tweens.
+	Built upon the foundations of Tweentown and SpringCity, AnimNation is a
+	utility that provides easy one-shot object animation using springs and
+	tweens.
+
+	Documentation:
+	[Types]
+		SpringInfo
+			A dictionary of spring properties such as {s = 10, d = 0.5}. Can be
+			constructed using any keys that you could use to create a Spring
+			object.
+
+		AnimChain
+			An object that listens for the end of a tween/spring animation and
+			then fires any connected :AndThen() callbacks. :AndThen() always
+			returns the same AnimChain object, so you can chain as many
+			callbacks together as you want.
+
+	[Tweens]
+		AnimNation tweens support all properties that are supported by
+		TweenService, as well as tweening Models by CFrame, Position, or
+		Orientation vectors, and tweening NumberSequence/ColorSequence values
+		(given that the target sequence has the same number of keypoints).
+
+		.tween(object: Instance, tweenInfo: TweenInfo, properties: {[string]: any}, waitToKill: boolean?): AnimChain
+			Asynchronously performs a tween on the given object. Parameters are
+			identical to TweenService:Create(), with the addition of waitToKill,
+			which will make	the operation synchronous (yielding) if true.
+			:AndThen() can be used to link another function that will be called
+			when the tween completes.
+
+		.getTweenFromInstance(object: Instance): Tween?
+			Returns the last tween played on the given object, or nil if none
+			exists.
+
+	[Springs]
+		AnimNation springs support the following types: number, Vector2,
+		Vector3, UDim, UDim2, CFrame, and Color3. These are natively supported
+		by the provided Spring class as well.
+
+		.impulse(object: Instance, springInfo: SpringInfo, properties: {[string]: any}, waitToKill: boolean?): AnimChain
+			Asynchronously performs a spring impulse on the given object.
+			The optional waitToKill flag will make the operation synchronous
+			(yielding) if true. :AndThen() can be used on this function's return
+			value to link another function that will be called when the spring
+			completes (reaches epsilon).
+
+		.target(object: Instance, springInfo: SpringInfo, properties: {[string]: any}, waitToKill: boolean?)
+			Asynchronously uses a spring to transition the given object's
+			properties to the specified values. The optional waitToKill flag
+			will make the operation synchronous (yielding) if true.
+				NOTE: waitToKill currently exhibits undefined behavior when
+				targeting multiple properties and no AnimChain is returned to
+				enable :AndThen() behavior. I plan to fix this and add
+				:AndThen() support in a future update.
+
+		.createSpring(name: string, springInfo: SpringInfo): Spring
+			Creates a new spring with the given properties and maps it to the
+			specified name. Aliases: .register()
+
+		.getSpring(name: string): Spring?
+			Returns the spring with the given name. If none exists, it will
+			return nil with a warning, or an error depending on the set
+			ERROR_POLICY. Aliases: .inquire()
+
+		.springAnimating(spring: Spring, epsilon: number?): (boolean, Vector3)
+			Modified from Quenty's SpringUtils. Returns whether the given spring
+			is currently animating (has not reached epsilon) and its current
+			position.
 --]]
 
 -- Services
@@ -58,7 +124,7 @@ local vector3 = Vector3.new
 local StdError = error
 local function error(message: string)
 	if ERROR_POLICY == "Warn" then
-		warn(message)
+		warn(message .. "\n" .. debug.traceback())
 	else
 		StdError(message)
 	end
@@ -66,16 +132,16 @@ end
 
 -- Classes and Types
 
-type Arithmetic = number | Vector2 | Vector3
+type Springable = Spring.Springable
 type Spring = Spring.Spring
 
 export type SpringInfo = {
-	Position: Arithmetic?,
+	Position: Springable?,
 	Velocity: number?,
-	Target: Arithmetic?,
+	Target: Springable?,
 	Damper: number?,
 	Speed: number?,
-	Initial: Arithmetic?,
+	Initial: Springable?,
 	Clock: (() -> number)?,
 }
 
@@ -153,29 +219,20 @@ local function murderTweenWhenDone(tween: Tween)
 	end
 end
 
-local function tweenByPrimaryPart(object: Model, tweenInfo: TweenInfo, properties: {}, waitToKill: boolean?): AnimChain
+local function tweenByPivot(object: Model, tweenInfo: TweenInfo, properties: {}, waitToKill: boolean?): AnimChain
 	if not object or not object:IsA("Model") then
-		warn("Tween by primary part failure - invalid object passed\n" .. debug.traceback())
+		error("Tween by pivot failure - invalid object passed")
 		if waitToKill then
 			task.wait(tweenInfo.Time)
 		end
 		return AnimChain.new()
 	end
 
-	-- Keep setting by PrimaryPartCFrame if PrimaryPart exists, until :PivotTo()
-	-- is proven to be faster. My own testing has been inconclusive so far.
 	local fakeCenter = Instance.new("Part")
-	if object.PrimaryPart then
-		fakeCenter.CFrame = object.PrimaryPart.CFrame
-		fakeCenter:GetPropertyChangedSignal("CFrame"):Connect(function()
-			object:SetPrimaryPartCFrame(fakeCenter.CFrame)
-		end)
-	else
-		fakeCenter.CFrame = object:GetPivot()
-		fakeCenter:GetPropertyChangedSignal("CFrame"):Connect(function()
-			object:PivotTo(fakeCenter.CFrame)
-		end)
-	end
+	fakeCenter.CFrame = object:GetPivot()
+	fakeCenter:GetPropertyChangedSignal("CFrame"):Connect(function()
+		object:PivotTo(fakeCenter.CFrame)
+	end)
 
 	task.delay(tweenInfo.Time, function()
 		fakeCenter:Destroy()
@@ -189,7 +246,7 @@ local function tweenSequence(object: Instance, sequenceName: string, tweenInfo: 
 	local sequenceType = typeof(originalSequence)
 	local numPoints = #originalSequence.Keypoints
 	if numPoints ~= #newSequence.Keypoints then
-		warn("Tween sequence failure - keypoint count mismatch\n" .. debug.traceback())
+		error("Tween sequence failure - keypoint count mismatch")
 		if waitToKill then
 			task.wait(tweenInfo.Time)
 		end
@@ -323,13 +380,13 @@ end
 
 -- Public Functions
 
--- Asynchronously performs a tween on the given object. Parameters are idential
+-- Asynchronously performs a tween on the given object. Parameters are identical
 -- to `TweenService:Create()`, with the addition of `waitToKill`, which will make
 -- the operation synchronous if true. `:AndThen()` can be used to link another
 -- function that will be called when the tween completes.
-function AnimNation.tween(object: Instance, tweenInfo: TweenInfo, properties: {}, waitToKill: boolean?): AnimChain
+function AnimNation.tween(object: Instance, tweenInfo: TweenInfo, properties: {[string]: any}, waitToKill: boolean?): AnimChain
 	if not object then
-		warn("Tween failure - invalid object passed\n" .. debug.traceback())
+		error("Tween failure - invalid object passed")
 		if waitToKill then
 			task.wait(tweenInfo.Time)
 		end
@@ -342,7 +399,7 @@ function AnimNation.tween(object: Instance, tweenInfo: TweenInfo, properties: {}
 
 	for property, newValue in pairs(properties) do
 		if isModel and property == "CFrame" then
-			alternativeAnimChain = tweenByPrimaryPart(object, tweenInfo, {CFrame = newValue})
+			alternativeAnimChain = tweenByPivot(object, tweenInfo, {CFrame = newValue})
 			properties[property] = nil
 		else
 			local propertyType = typeof(object[property])
@@ -389,7 +446,7 @@ end
 -- will be called when the spring completes (reaches epsilon).
 function AnimNation.impulse(object: Instance, springInfo: SpringInfo, properties: {[string]: any}, waitToKill: boolean?): AnimChain
 	if not object then
-		warn("Spring failure - invalid object passed\n" .. debug.traceback())
+		error("Spring failure - invalid object passed")
 		return AnimChain.new()
 	end
 
@@ -437,15 +494,17 @@ end
 -- Asynchronously uses a spring to transition the given object's properties to
 -- the specified values. `SpringInfo` is a table of spring properties such as
 -- `{s = 10, d = 0.5}`. The optional `waitToKill` flag will make the operation
--- synchronous if true. `:AndThen()` can be used on this function's return value
--- to link another function that will be called when the spring completes
--- (reaches epsilon).
+-- synchronous if true.
+--
+-- NOTE: `waitToKill` currently exhibits undefined behavior when targeting
+-- multiple properties and no `AnimChain` is returned to enable `:AndThen()`
+-- behavior. I plan to fix this and add `:AndThen()` support in a future update.
 function AnimNation.target(object: Instance, springInfo: SpringInfo, properties: {[string]: any}, waitToKill: boolean?)
 	local yieldStarted = false
 	for property, target in pairs(properties) do
 		local targetType = typeof(target)
 		if not ZEROS[targetType] then
-			error("Spring failure - unsupported target type '" .. targetType .. "' passed\n" .. debug.traceback())
+			error("Spring failure - unsupported target type '" .. targetType .. "' passed")
 			continue
 		end
 		springInfo.Target = target

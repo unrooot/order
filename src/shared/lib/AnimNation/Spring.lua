@@ -45,7 +45,7 @@ Visualization (by Defaultio):
 
 local Spring = {}
 
-type Springable = Vector3 | Vector2 | number | UDim2 | UDim | CFrame | Color3
+export type Springable = Vector3 | Vector2 | number | UDim2 | UDim | CFrame | Color3
 export type Spring = {
 	Position: Springable,
 	Velocity: Springable,
