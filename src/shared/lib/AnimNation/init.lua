@@ -2,7 +2,7 @@
 	Author: ChiefWildin
 	Module: AnimNation
 	Created: 10/12/2022
-	Version: 1.1.0
+	Version: 1.2.0
 
 	Built upon the foundations of Tweentown and SpringCity, AnimNation is a
 	utility that provides easy one-shot object animation using springs and
@@ -21,18 +21,42 @@
 			returns the same AnimChain object, so you can chain as many
 			callbacks together as you want.
 
+		TweenInfo
+			TweenInfo can be passed to the tweening functions as either a
+			TweenInfo object or a dictionary of the desired parameters. Keys are
+			either the TweenInfo parameter name or shortened versions:
+			Time = Time | t
+			EasingStyle = EasingStyle | Style | s
+			EasingDirection = EasingDirection | Direction | d
+			RepeatCount = RepeatCount | Repeat | rc
+			Reverses = Reverses | Reverse | r
+			DelayTime = DelayTime | Delay | dt
+
 	[Tweens]
 		AnimNation tweens support all properties that are supported by
-		TweenService, as well as tweening Models by CFrame, Position, or
-		Orientation vectors, and tweening NumberSequence/ColorSequence values
-		(given that the target sequence has the same number of keypoints).
+		TweenService, as well as tweening Models by CFrame and tweening
+		NumberSequence/ColorSequence values	(given that the target sequence has
+		the same number of keypoints).
 
-		.tween(object: Instance, tweenInfo: TweenInfo, properties: {[string]: any}, waitToKill: boolean?): AnimChain
+		.tween(object: Instance, tweenInfo: TweenInfo | {}, properties: {[string]: any}, waitToKill: boolean?): AnimChain
 			Asynchronously performs a tween on the given object. Parameters are
 			identical to TweenService:Create(), with the addition of waitToKill,
 			which will make	the operation synchronous (yielding) if true.
 			:AndThen() can be used to link another function that will be called
 			when the tween completes.
+
+		.tweenFromAlpha(object: Instance, tweenInfo: TweenInfo | {}, properties: {[string]: any}, alpha: number, waitToKill: boolean?): AnimChain
+			Asynchronously performs a tween on the given object, starting from
+			the specified alpha percentage. Otherwise identical to
+			AnimNation.tween. Currently supports number, Vector2, Vector3,
+			CFrame, Color3, UDim2, UDim and any other type that supports scalar
+			multiplication/addition.
+				NOTE: Currently supports tweening Models by CFrame, but does not
+				yet support tweening NumberSequence/ColorSequence values. Using
+				.getTweenFromInstance() will also not return a Tween if using
+				this function. This is due to the backend being a custom
+				solution since Roblox doesn't natively support skipping around
+				in Tween objects :)
 
 		.getTweenFromInstance(object: Instance): Tween?
 			Returns the last tween played on the given object, or nil if none
@@ -202,6 +226,13 @@ local TweenDirectory: {[Instance]: Tween} = {}
 -- values.
 local ActiveSequences: {[Instance]: {[string]: {[string]: NumberValue | Color3Value}}} = {}
 
+-- A dictionary that keeps track of any custom tween processes (tweenFromAlpha).
+-- Instances are used as keys to a sub-dictionary that maps properties to the
+-- ID of the custom tween being used to animate them.
+local CustomTweens: {[Instance]: {[string]: number}} = {}
+
+-- The last ID used to identify which custom tween is controlling a property.
+local LastCustomTweenId = 0
 
 -- Objects
 
@@ -336,6 +367,17 @@ local function tweenSequence(object: Instance, sequenceName: string, tweenInfo: 
 	end
 end
 
+local function createTweenInfoFromTable(info: {})
+	return TweenInfo.new(
+		info.Time or info.t or 1,
+		info.EasingStyle or info.Style or info.s or Enum.EasingStyle.Quad,
+		info.EasingDirection or info.Direction or info.d or Enum.EasingDirection.Out,
+		info.RepeatCount or info.Repeat or info.rc or 0,
+		info.Reverses or info.Reverse or info.r or false,
+		info.DelayTime or info.Delay or info.dt or 0
+	)
+end
+
 local function createSpringFromInfo(springInfo: SpringInfo): Spring
 	local spring = Spring.new(springInfo.Initial, springInfo.Clock)
 	for key, value in pairs(springInfo) do
@@ -380,17 +422,24 @@ end
 
 -- Public Functions
 
--- Asynchronously performs a tween on the given object. Parameters are identical
--- to `TweenService:Create()`, with the addition of `waitToKill`, which will make
--- the operation synchronous if true. `:AndThen()` can be used to link another
--- function that will be called when the tween completes.
-function AnimNation.tween(object: Instance, tweenInfo: TweenInfo, properties: {[string]: any}, waitToKill: boolean?): AnimChain
+-- Asynchronously performs a tween on the given object.
+--
+-- Parameters are identical to `TweenService:Create()`, with the addition of
+-- `waitToKill`, which will make the operation synchronous if true.
+--
+-- `:AndThen()` can be used to link a callback function when the tween
+-- completes.
+function AnimNation.tween(object: Instance, tweenInfo: TweenInfo | {}, properties: {[string]: any}, waitToKill: boolean?): AnimChain
 	if not object then
 		error("Tween failure - invalid object passed")
 		if waitToKill then
 			task.wait(tweenInfo.Time)
 		end
 		return AnimChain.new()
+	end
+
+	if typeof(tweenInfo) == "table" then
+		tweenInfo = createTweenInfoFromTable(tweenInfo)
 	end
 
 	local isModel = object:IsA("Model")
@@ -424,6 +473,7 @@ function AnimNation.tween(object: Instance, tweenInfo: TweenInfo, properties: {[
 
 	thisTween:Play()
 	TweenDirectory[object] = thisTween
+	CustomTweens[object] = nil
 
 	if waitToKill then
 		murderTweenWhenDone(thisTween)
@@ -434,16 +484,140 @@ function AnimNation.tween(object: Instance, tweenInfo: TweenInfo, properties: {[
 	return tweenChain :: AnimChain
 end
 
+-- Asynchronously performs a tween on the given object, starting from the
+-- specified `alpha` percentage.
+--
+-- Parameters are identical to `TweenService:Create()`, with the addition of
+-- `waitToKill` which will make the operation synchronous if true.
+--
+-- `:AndThen()` can be used to link a callback function when the tween
+-- completes.
+--
+-- Currently supports number, Vector2, Vector3, CFrame, Color3, UDim2, UDim and
+-- any other type that supports scalar multiplication/addition.
+function AnimNation.tweenFromAlpha(object: Instance, tweenInfo: TweenInfo | {}, properties: {[string]: any}, alpha: number, waitToKill: boolean?): AnimChain
+	if typeof(alpha) ~= "number" or alpha < 0 or alpha >= 1 then
+		error("Tween failure - alpha must be a number greater than 0 and less than 1")
+		return AnimChain.new()
+	elseif not object then
+		error("Tween failure - invalid object passed")
+		if waitToKill then
+			task.wait(tweenInfo.Time * (1 - alpha))
+		end
+		return AnimChain.new()
+	end
+
+	if typeof(tweenInfo) == "table" then
+		tweenInfo = createTweenInfoFromTable(tweenInfo)
+	end
+
+	local function getValue(start: any, target: any, a: number): any
+		local valueType = typeof(target)
+		if valueType == "CFrame" then
+			local currentCFrame = if object:IsA("Model") then object:GetPivot() else object.CFrame
+			return currentCFrame:Lerp(target, a)
+		elseif valueType == "Color3" or valueType == "UDim2" then
+			return start:Lerp(target, a)
+		elseif valueType == "UDim" then
+			local currentUDim: UDim = start
+			return UDim.new(
+				currentUDim.Scale + (target.Scale - currentUDim.Scale) * a,
+				currentUDim.Offset + (target.Offset - currentUDim.Offset) * a)
+		end
+		return start + (target - start) * a
+	end
+
+	local thisTweenId = LastCustomTweenId + 1
+	LastCustomTweenId = thisTweenId
+
+	if not CustomTweens[object] then
+		CustomTweens[object] = {}
+	end
+
+	local startingAlpha = TweenService:GetValue(alpha, tweenInfo.EasingStyle, tweenInfo.EasingDirection)
+	local firstIteration = {}
+	local startingProperties = {}
+	for property, value in pairs(properties) do
+		startingProperties[property] = object[property]
+		firstIteration[property] = getValue(object[property], value, startingAlpha)
+		-- Set custom tween control to this process
+		CustomTweens[object][property] = thisTweenId
+	end
+
+	-- Instantly apply starting values through TweenService, overriding any
+	-- regular tweens from calling .tween()
+	local firstIterationTween = TweenService:Create(object, TweenInfo.new(0), firstIteration)
+	firstIterationTween:Play()
+
+	-- Perform remainder of tween
+	local function performTween()
+		local remainingAlpha = 1 - alpha
+		local tweenLength = tweenInfo.Time * remainingAlpha
+		local endTime = os.clock() + tweenLength
+		while os.clock() < endTime do
+			local stillControllingSomething = false
+			if CustomTweens[object] then
+				local percentComplete = 1 - ((endTime - os.clock()) / tweenLength)
+				local currentAlpha = TweenService:GetValue(
+					alpha + (remainingAlpha * percentComplete),
+					tweenInfo.EasingStyle,
+					tweenInfo.EasingDirection)
+				for property, tweenId in pairs(CustomTweens[object]) do
+					-- Only apply properties if this tween is still the most
+					-- recent
+					if tweenId == thisTweenId then
+						local newValue = getValue(startingProperties[property], properties[property], currentAlpha)
+						object[property] = newValue
+						stillControllingSomething = true
+					end
+				end
+			end
+
+			task.wait()
+
+			if not stillControllingSomething then
+				break
+			end
+		end
+
+		if CustomTweens[object] then
+			-- Clean up now that the tween has finished
+			for property, tweenId in pairs(CustomTweens[object]) do
+				if tweenId == thisTweenId then
+					CustomTweens[object][property] = nil
+				end
+			end
+			-- If there are still any other tweens playing on this object, we're
+			-- done
+			for _, _ in CustomTweens[object] do
+				return
+			end
+			-- Otherwise, clean up the table
+			CustomTweens[object] = nil
+		end
+	end
+
+	if waitToKill then
+		performTween()
+	else
+		task.spawn(performTween)
+	end
+
+	firstIterationTween:Destroy()
+end
+
 -- Returns the last tween played on the given object, or `nil` if none exists.
 function AnimNation.getTweenFromInstance(object: Instance): Tween?
 	return TweenDirectory[object]
 end
 
--- Asynchronously performs a spring impulse on the given object. `SpringInfo` is
--- a table of spring properties such as `{s = 10, d = 0.5}`. The optional
--- `waitToKill` flag will make the operation synchronous if true. `:AndThen()`
--- can be used on this function's return value to link another function that
--- will be called when the spring completes (reaches epsilon).
+-- Asynchronously performs a spring impulse on the given object.
+--
+-- `SpringInfo` is a table of spring properties such as `{s = 10, d = 0.5}`. The
+-- optional `waitToKill` flag will make the operation synchronous if true.
+--
+-- `:AndThen()` can be used on this function's return value to link another
+-- function that will be called when the spring completes (reaches epsilon).
 function AnimNation.impulse(object: Instance, springInfo: SpringInfo, properties: {[string]: any}, waitToKill: boolean?): AnimChain
 	if not object then
 		error("Spring failure - invalid object passed")
@@ -492,9 +666,10 @@ function AnimNation.impulse(object: Instance, springInfo: SpringInfo, properties
 end
 
 -- Asynchronously uses a spring to transition the given object's properties to
--- the specified values. `SpringInfo` is a table of spring properties such as
--- `{s = 10, d = 0.5}`. The optional `waitToKill` flag will make the operation
--- synchronous if true.
+-- the specified values.
+--
+--`SpringInfo` is a table of spring properties such as `{s = 10, d = 0.5}`. The
+-- optional `waitToKill` flag will make the operation synchronous if true.
 --
 -- NOTE: `waitToKill` currently exhibits undefined behavior when targeting
 -- multiple properties and no `AnimChain` is returned to enable `:AndThen()`
