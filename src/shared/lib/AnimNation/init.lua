@@ -2,11 +2,11 @@
 	Author: ChiefWildin
 	Module: AnimNation
 	Created: 10/12/2022
-	Version: 1.2.0
+	Version: 1.3.0
 
 	Built upon the foundations of Tweentown and SpringCity, AnimNation is a
-	utility that provides easy one-shot object animation using springs and
-	tweens.
+	utility that makes object animation using springs and tweens simple and
+	quick.
 
 	Documentation:
 	[Types]
@@ -83,19 +83,24 @@
 				enable :AndThen() behavior. I plan to fix this and add
 				:AndThen() support in a future update.
 
-		.createSpring(name: string, springInfo: SpringInfo): Spring
+		.bind(springs: {Spring}, label: string, callback: (positions: {Springable}, velocities: {Springable}) -> ())
+			Binds a callback function to the given springs' positions and
+			velocities. Can be used to create more complex and constant
+			interactions with spring values than just a quick impulse or target.
+
+		.unbind(spring: Spring, label: string)
+			Unbinds the callback associated with the specified label from
+			updates.
+
+		.createSpring(springInfo: SpringInfo, name: string?): Spring
 			Creates a new spring with the given properties and maps it to the
-			specified name. Aliases: .register()
+			specified name, if provided. An initial value can be provided in the
+			SpringInfo table. Aliases: .register()
 
 		.getSpring(name: string): Spring?
 			Returns the spring with the given name. If none exists, it will
 			return nil with a warning, or an error depending on the set
 			ERROR_POLICY. Aliases: .inquire()
-
-		.springAnimating(spring: Spring, epsilon: number?): (boolean, Vector3)
-			Modified from Quenty's SpringUtils. Returns whether the given spring
-			is currently animating (has not reached epsilon) and its current
-			position.
 --]]
 
 -- Services
@@ -118,7 +123,6 @@ local Spring = require(script:WaitForChild("Spring"))
 -- Constants
 
 local ERROR_POLICY: "Warn" | "Error" = if RunService:IsStudio() then "Error" else "Warn"
-local EPSILON = 1e-4
 local SUPPORTED_TYPES = {
 	number = true,
 	Vector2 = true,
@@ -137,11 +141,6 @@ local ZEROS = {
 	CFrame = CFrame.identity,
 	Color3 = Color3.new()
 }
-
--- Aliases
-
-local abs = math.abs
-local vector3 = Vector3.new
 
 -- Overloads
 
@@ -219,6 +218,11 @@ local SpringDirectory: {[string]: Spring} = {}
 -- properties.
 local SpringEvents: {[Instance]: {[string]: Spring}} = {}
 
+-- A dictionary that keeps track of different callbacks bound to groups of
+-- springs. The label key references a table containing a table of springs in
+-- the first index, and the callback function in the second index.
+local SpringBinds: {[string]: {}} = {}
+
 -- A dictionary that keeps track of the last tween played on each instance.
 local TweenDirectory: {[Instance]: Tween} = {}
 
@@ -233,6 +237,9 @@ local CustomTweens: {[Instance]: {[string]: number}} = {}
 
 -- The last ID used to identify which custom tween is controlling a property.
 local LastCustomTweenId = 0
+
+-- Whether or not the loop controlling spring bind callbacks is running.
+local BindLoopRunning = false
 
 -- Objects
 
@@ -417,6 +424,41 @@ local function animate(spring, object, property)
 		if not stillHasSprings then
 			SpringEvents[object] = nil
 		end
+	end
+end
+
+local function springBindLoop()
+	if not BindLoopRunning then
+		BindLoopRunning = true
+		task.spawn(function()
+			while true do
+				local activeBind = false
+				for _, bind in pairs(SpringBinds) do
+					activeBind = true
+					local springs = bind[1]
+					local callback = bind[2]
+					local springCount = #springs
+					local positions = table.create(springCount)
+					local velocities = table.create(springCount)
+					for index, spring: Spring in pairs(springs) do
+						local animating, position = spring:IsAnimating()
+						if animating then
+							positions[index] = position
+							velocities[index] = spring.Velocity
+						else
+							positions[index] = spring.Target
+							velocities[index] = ZEROS[spring.Type]
+						end
+					end
+					callback(positions, velocities)
+				end
+				if not activeBind then
+					break
+				end
+				task.wait()
+			end
+			BindLoopRunning = false
+		end)
 	end
 end
 
@@ -688,11 +730,26 @@ function AnimNation.target(object: Instance, springInfo: SpringInfo, properties:
 	end
 end
 
+-- Binds a callback function to the given springs' position and velocity. Can be
+-- used to create more complex and constant interactions with spring values than
+-- just a quick impulse or target.
+function AnimNation.bind(springs: {Spring}, label: string, callback: (positions: {Springable}, velocities: {Springable}) -> ())
+	SpringBinds[label] = {springs, callback}
+	springBindLoop()
+end
+
+-- Unbinds the callback associated with the specified label from updates.
+function AnimNation.unbind(label: string)
+	SpringBinds[label] = nil
+end
+
 -- Creates a new spring with the given properties. `SpringInfo` is a table of
 -- spring properties such as `{s = 10, d = 0.5}`.
-function AnimNation.createSpring(name: string, springInfo: SpringInfo): Spring
+function AnimNation.createSpring(springInfo: SpringInfo, name: string?): Spring
 	local newSpring = createSpringFromInfo(springInfo)
-	SpringDirectory[name] = newSpring
+	if name then
+		SpringDirectory[name] = newSpring
+	end
 	return newSpring
 end
 
@@ -703,52 +760,6 @@ function AnimNation.getSpring(name: string): Spring?
 		return SpringDirectory[name]
 	else
 		error(string.format("Spring '%s' does not exist", name))
-	end
-end
-
--- Modified from Quenty's SpringUtils. Returns whether the given spring is
--- currently animating (has not reached epsilon) and its current position.
-function AnimNation.springAnimating(spring: Spring, epsilon: number?): (boolean, Vector3)
-	epsilon = epsilon or EPSILON
-
-	local position = spring.Position
-	local velocity = spring.Velocity
-	local target = spring.Target
-
-	local animating
-	if spring.Type == "number" then
-		animating = abs(position - target) > epsilon or abs(velocity) > epsilon
-	elseif spring.Type == "Vector3" or spring.Type == "Vector2" then
-		animating = (position - target).Magnitude > epsilon or velocity.Magnitude > epsilon
-	elseif spring.Type == "UDim2" then
-		animating = abs(position.X.Scale - target.X.Scale) > epsilon or abs(velocity.X.Scale) > epsilon or
-			abs(position.X.Offset - target.X.Offset) > epsilon or abs(velocity.X.Offset) > epsilon or
-			abs(position.Y.Scale - target.Y.Scale) > epsilon or abs(velocity.Y.Scale) > epsilon or
-			abs(position.Y.Offset - target.Y.Offset) > epsilon or abs(velocity.Y.Offset) > epsilon
-	elseif spring.Type == "UDim" then
-		animating = abs(position.Scale - target.Scale) > epsilon or abs(velocity.Scale) > epsilon or
-			abs(position.Offset - target.Offset) > epsilon or abs(velocity.Offset) > epsilon
-	elseif spring.Type == "CFrame" then
-		local startAngleVector, startAngleRot = position:ToAxisAngle()
-		local velocityAngleVector, velocityAngleRot = velocity:ToAxisAngle()
-		local targetAngleVector, targetAngleRot = target:ToAxisAngle()
-		animating = (position.Position - target.Position).Magnitude > epsilon or velocity.Position.Magnitude > epsilon or
-			(startAngleVector - targetAngleVector).Magnitude > epsilon or velocityAngleVector.Magnitude > epsilon or
-			abs(startAngleRot - targetAngleRot) > epsilon or abs(velocityAngleRot) > epsilon
-	elseif spring.Type == "Color3" then
-		local startVector = vector3(position.R, position.G, position.B)
-		local velocityVector = vector3(velocity.R, velocity.G, velocity.B)
-		local targetVector = vector3(target.R, target.G, target.B)
-		animating = (startVector - targetVector).Magnitude > epsilon or velocityVector.Magnitude > epsilon
-	else
-		error("Unknown type")
-	end
-
-	if animating then
-		return true, position
-	else
-		-- We need to return the target so we use the actual target value (i.e. pretend like the spring is asleep)
-		return false, target
 	end
 end
 
